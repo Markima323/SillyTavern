@@ -1,0 +1,125 @@
+name: Deploy to Hetzner
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [release]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sillytavern-production
+  cancel-in-progress: false
+
+jobs:
+  quality-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        # Locally installed third-party extensions are not part of this repo and
+        # may contain vendored/minified JavaScript that follows other style rules.
+        run: npm run lint -- --ignore-pattern 'public/scripts/extensions/third-party/**'
+
+      - name: Validate production Compose
+        env:
+          SILLYTAVERN_BASIC_AUTH_USERNAME: ci-only-user
+          SILLYTAVERN_BASIC_AUTH_PASSWORD: ci-only-password
+        run: docker compose -f compose.prod.yml config --quiet
+
+      - name: Build production image
+        run: docker build --tag sillytavern:ci .
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: quality-gate
+    environment: production
+    steps:
+      - name: Validate deployment secrets
+        env:
+          HETZNER_HOST: ${{ secrets.HETZNER_HOST }}
+          HETZNER_USER: ${{ secrets.HETZNER_USER }}
+          HETZNER_DEPLOY_PATH: ${{ secrets.HETZNER_DEPLOY_PATH }}
+          HETZNER_SSH_KEY: ${{ secrets.HETZNER_SSH_KEY }}
+        run: |
+          test -n "$HETZNER_HOST" || { echo "Missing secret: HETZNER_HOST"; exit 1; }
+          test -n "$HETZNER_USER" || { echo "Missing secret: HETZNER_USER"; exit 1; }
+          test -n "$HETZNER_DEPLOY_PATH" || { echo "Missing secret: HETZNER_DEPLOY_PATH"; exit 1; }
+          test -n "$HETZNER_SSH_KEY" || { echo "Missing secret: HETZNER_SSH_KEY"; exit 1; }
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.HETZNER_HOST }}
+          port: ${{ secrets.HETZNER_PORT || 22 }}
+          username: ${{ secrets.HETZNER_USER }}
+          key: ${{ secrets.HETZNER_SSH_KEY }}
+          passphrase: ${{ secrets.HETZNER_SSH_PASSPHRASE }}
+          script_stop: true
+          command_timeout: 30m
+          script: |
+            set -eu
+            cd "${{ secrets.HETZNER_DEPLOY_PATH }}"
+            test -f .env || { echo "Missing server .env file"; exit 1; }
+
+            compose() {
+              docker compose --env-file .env -f compose.prod.yml "$@"
+            }
+
+            mkdir -p deploy/backups
+            if docker volume inspect sillytavern-data >/dev/null 2>&1; then
+              backup="sillytavern-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
+              docker run --rm \
+                -v sillytavern-config:/source/config:ro \
+                -v sillytavern-data:/source/data:ro \
+                -v sillytavern-plugins:/source/plugins:ro \
+                -v sillytavern-extensions:/source/extensions:ro \
+                -v "$PWD/deploy/backups:/backup" \
+                alpine:3.22 tar -czf "/backup/$backup" -C /source .
+              find deploy/backups -type f -name 'sillytavern-*.tar.gz' -mtime +14 -delete
+            fi
+
+            git fetch origin release
+            git checkout release
+            git pull --ff-only origin release
+            compose config --quiet
+            docker network inspect public-proxy >/dev/null 2>&1 || docker network create public-proxy
+            compose up -d --build --remove-orphans
+
+            container_id="$(compose ps -q sillytavern)"
+            test -n "$container_id" || { echo "SillyTavern container was not created"; exit 1; }
+
+            attempt=1
+            while [ "$attempt" -le 60 ]; do
+              status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container_id")"
+              if [ "$status" = "healthy" ]; then
+                echo "SillyTavern is healthy"
+                break
+              fi
+              if [ "$status" = "unhealthy" ] || [ "$status" = "exited" ]; then
+                compose logs --tail 150 sillytavern
+                exit 1
+              fi
+              if [ "$attempt" -eq 60 ]; then
+                echo "SillyTavern did not become healthy in time"
+                compose logs --tail 150 sillytavern
+                exit 1
+              fi
+              sleep 3
+              attempt=$((attempt + 1))
+            done
+
+            compose ps
+            docker image prune -f --filter "until=168h"

@@ -1,0 +1,56 @@
+services:
+  sillytavern:
+    build:
+      context: .
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      FORCE_COLOR: "1"
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      SILLYTAVERN_HEARTBEATINTERVAL: "30"
+      SILLYTAVERN_BROWSERLAUNCH_ENABLED: "false"
+      SILLYTAVERN_BASICAUTHMODE: "true"
+      SILLYTAVERN_BASICAUTHUSER_USERNAME: ${SILLYTAVERN_BASIC_AUTH_USERNAME:?SILLYTAVERN_BASIC_AUTH_USERNAME is required}
+      SILLYTAVERN_BASICAUTHUSER_PASSWORD: ${SILLYTAVERN_BASIC_AUTH_PASSWORD:?SILLYTAVERN_BASIC_AUTH_PASSWORD is required}
+      SILLYTAVERN_HOSTWHITELIST_ENABLED: "true"
+      SILLYTAVERN_HOSTWHITELIST_HOSTS: '["${SILLYTAVERN_HOSTNAME:-chat.markima.de}"]'
+      # Nginx connects through Docker's gateway. Do not apply the local-IP
+      # whitelist to the original public client address forwarded by Nginx.
+      SILLYTAVERN_ENABLEFORWARDEDWHITELIST: "false"
+      SILLYTAVERN_RATELIMITING_PREFERREALIPHEADER: "true"
+    expose:
+      - "8000"
+    volumes:
+      - sillytavern-config:/home/node/app/config
+      - sillytavern-data:/home/node/app/data
+      - sillytavern-plugins:/home/node/app/plugins
+      - sillytavern-extensions:/home/node/app/public/scripts/extensions/third-party
+      - sillytavern-backups:/home/node/app/backups
+    networks:
+      public-proxy:
+        aliases:
+          - sillytavern
+    healthcheck:
+      test: ["CMD", "node", "src/healthcheck.js"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 5
+
+networks:
+  public-proxy:
+    external: true
+    name: ${PUBLIC_PROXY_NETWORK:-public-proxy}
+
+volumes:
+  sillytavern-config:
+    name: sillytavern-config
+  sillytavern-data:
+    name: sillytavern-data
+  sillytavern-plugins:
+    name: sillytavern-plugins
+  sillytavern-extensions:
+    name: sillytavern-extensions
+  sillytavern-backups:
+    name: sillytavern-backups
