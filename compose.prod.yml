@@ -15,8 +15,10 @@ services:
       SILLYTAVERN_BASICAUTHUSER_PASSWORD: ${SILLYTAVERN_BASIC_AUTH_PASSWORD:?SILLYTAVERN_BASIC_AUTH_PASSWORD is required}
       SILLYTAVERN_HOSTWHITELIST_ENABLED: "true"
       SILLYTAVERN_HOSTWHITELIST_HOSTS: '["${SILLYTAVERN_HOSTNAME:-chat.markima.de}"]'
-      # Nginx connects through Docker's gateway. Do not apply the local-IP
-      # whitelist to the original public client address forwarded by Nginx.
+      # Requests arrive from a sibling Nginx container whose dynamic address is
+      # not part of SillyTavern's localhost whitelist. Access is instead guarded
+      # by Basic Auth, the hostname whitelist, and the private Docker network.
+      SILLYTAVERN_WHITELISTMODE: "false"
       SILLYTAVERN_ENABLEFORWARDEDWHITELIST: "false"
       SILLYTAVERN_RATELIMITING_PREFERREALIPHEADER: "true"
     expose:
