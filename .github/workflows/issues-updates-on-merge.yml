@@ -15,7 +15,9 @@ jobs:
   update-linked-issues:
     name: 🔗 Mark Linked Issues Done on Push
     runs-on: ubuntu-latest
-    if: always()
+    # This maintenance bot belongs to the upstream repository. Forks do not
+    # have its GitHub App credentials and should skip the job.
+    if: github.repository == 'SillyTavern/SillyTavern'
 
     steps:
       - name: Mint App Token
